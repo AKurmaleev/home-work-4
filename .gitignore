@@ -1,0 +1,6 @@
+/target/
+/__MACOSX/
+/input.bin
+/slow.bin
+/fast.bin
+*.exe
