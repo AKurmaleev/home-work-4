@@ -1,23 +1,23 @@
-# ДЗ 4 — буферизованный файловый ввод-вывод
+# Homework 4 — Buffered file I/O
 
-Задание по лекции 8 «The Storage»: реализовать собственные `MyBufReader` и `MyBufWriter` без `std::io::BufReader` и `std::io::BufWriter`. Пакет называется `hw`; сигнатуры из исходного шаблона сохранены.
+Assignment based on lecture 8, “The Storage”: implement custom `MyBufReader` and `MyBufWriter` without `std::io::BufReader` or `std::io::BufWriter`. The package is named `hw`; signatures from the original template are preserved.
 
-## Что сделано
+## Implementation
 
-- `src/lib.rs`: `MyBufReader` выдаёт байты по одному, но читает файл блоками до 64 KiB. `position` и `filled` отслеживают непрочитанную часть буфера; ноль от `File::read` означает конец файла.
-- `MyBufWriter` принимает любые порции байтов, накапливает до 64 KiB и записывает блок при заполнении, `flush()` или `close()`. При короткой записи или ошибке сохраняет только ещё не записанный суффикс; прерванный вызов повторяет.
-- Исходные `copy_slow` и `copy_fast` оставлены с одинаковым побайтным внешним циклом: разницу создаёт именно буферизация внутри читателя и писателя.
-- `tests/io_tests.rs` и модульные тесты `src/lib.rs` проверяют пустой файл, двоичные данные, границы 64 KiB, несколько блоков, совпадение копий и ошибку после частичной записи.
+- `src/lib.rs`: `MyBufReader` returns one byte at a time but reads the file in blocks of up to 64 KiB. `position` and `filled` track the unread portion of the buffer; zero returned by `File::read` means end of file.
+- `MyBufWriter` accepts arbitrary chunks of bytes, accumulates up to 64 KiB, and writes a block when the buffer is full or on `flush()` or `close()`. On a short write or error, it retains only the unwritten suffix; interrupted calls are retried.
+- The original `copy_slow` and `copy_fast` retain the same byte-by-byte outer loop: the difference comes specifically from buffering inside the reader and writer.
+- `tests/io_tests.rs` and the unit tests in `src/lib.rs` cover empty files, binary data, 64 KiB boundaries, multiple blocks, identical copies, and an error after a partial write.
 
-**Ограничение:** `flush()` передаёт данные из буфера приложения файловому объекту, но не гарантирует их сохранности после сбоя питания (`sync_all` здесь не требуется). После ошибки `write_buffered()` часть входа уже могла быть принята: повторять целиком тот же срез без учёта прогресса нельзя.
+**Limitation:** `flush()` transfers data from the application buffer to the file object but does not guarantee durability after a power failure (`sync_all` is not required here). After a `write_buffered()` error, some input may already have been accepted: the entire same slice must not be retried without accounting for progress.
 
-## Проверка
+## Verification
 
 ```sh
 cargo test
 cargo run --release
 ```
 
-Демонстрация в `src/main.rs` создаёт в текущем каталоге `input.bin`, `slow.bin`, `fast.bin`, копирует примерно 0,95 MiB обоими способами и сверяет содержимое. Эти файлы исключены из Git. Программа делает **один** замер каждого способа; числа не являются статистически подтверждённым приростом. Для строгого сравнения нужны прогрев, повторные независимые запуски и контроль кэша ОС и нагрузки.
+The demonstration in `src/main.rs` creates `input.bin`, `slow.bin`, and `fast.bin` in the current directory, copies approximately 0.95 MiB using both methods, and compares the contents. These files are excluded from Git. The program takes **one** measurement per method; the numbers do not establish a statistically supported speedup. A rigorous comparison requires warm-up, repeated independent runs, and control of the OS cache and system load.
 
-Обе реализации копирования имеют время `O(n)`. Быстрая дополнительно занимает `O(64 KiB)` на каждый из двух буферов (`128 KiB` суммарно без учёта буферов ОС); медленная не выделяет таких буферов приложения. Плата памятью уменьшает число обращений к `File` с порядка `n` до порядка `n / 65536`.
+Both copy implementations take `O(n)` time. The fast version additionally uses `O(64 KiB)` for each of its two buffers (`128 KiB` total, excluding OS buffers); the slow version does not allocate these application buffers. This memory trade-off reduces the number of calls to `File` from order `n` to order `n / 65536`.
