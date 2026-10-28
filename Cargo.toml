@@ -2,5 +2,16 @@
 name = "hw"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+publish = false
 
-[dependencies]
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+todo = "deny"
+let_underscore_must_use = "deny"
+unused_result_ok = "deny"

@@ -1,6 +1,11 @@
+//! File-I/O contract, buffering-boundary, and record-generation regression tests.
+
 use std::{fs, io};
 
-use hw::{BUFFER_SIZE, MyBufReader, MyBufWriter, copy_fast, copy_slow, generate_input_file};
+use hw::{
+    BUFFER_SIZE, MyBufReader, MyBufWriter, RECORD_SIZE, copy_fast, copy_slow, generate_input_file,
+    make_record,
+};
 
 #[test]
 fn my_buf_reader_reads_all_bytes() -> io::Result<()> {
@@ -18,7 +23,8 @@ fn my_buf_reader_reads_all_bytes() -> io::Result<()> {
 
     assert_eq!(result, b"hello buffered reader");
 
-    let _ = fs::remove_file(input);
+    drop(reader);
+    fs::remove_file(input)?;
 
     Ok(())
 }
@@ -33,7 +39,8 @@ fn my_buf_reader_handles_empty_file() -> io::Result<()> {
 
     assert_eq!(reader.read_byte()?, None);
 
-    let _ = fs::remove_file(input);
+    drop(reader);
+    fs::remove_file(input)?;
 
     Ok(())
 }
@@ -55,7 +62,8 @@ fn my_buf_reader_reads_more_than_one_buffer() -> io::Result<()> {
 
     assert_eq!(result, data);
 
-    let _ = fs::remove_file(input);
+    drop(reader);
+    fs::remove_file(input)?;
 
     Ok(())
 }
@@ -78,7 +86,7 @@ fn my_buf_writer_writes_all_bytes_after_close() -> io::Result<()> {
 
     assert_eq!(result, b"hello world");
 
-    let _ = fs::remove_file(output);
+    fs::remove_file(output)?;
 
     Ok(())
 }
@@ -105,7 +113,7 @@ fn my_buf_writer_handles_many_small_writes() -> io::Result<()> {
         assert_eq!(chunk, b"ab");
     }
 
-    let _ = fs::remove_file(output);
+    fs::remove_file(output)?;
 
     Ok(())
 }
@@ -131,7 +139,7 @@ fn my_buf_writer_flush_writes_data_without_close() -> io::Result<()> {
 
     assert_eq!(result, b"abcdef");
 
-    let _ = fs::remove_file(output);
+    fs::remove_file(output)?;
 
     Ok(())
 }
@@ -154,9 +162,9 @@ fn copy_fast_produces_same_output_as_copy_slow() -> io::Result<()> {
 
     assert_eq!(slow_data, fast_data);
 
-    let _ = fs::remove_file(input);
-    let _ = fs::remove_file(slow);
-    let _ = fs::remove_file(fast);
+    fs::remove_file(input)?;
+    fs::remove_file(slow)?;
+    fs::remove_file(fast)?;
 
     Ok(())
 }
@@ -173,8 +181,8 @@ fn copy_fast_handles_empty_file() -> io::Result<()> {
     assert_eq!(copied, 0);
     assert_eq!(fs::read(&output)?, b"");
 
-    let _ = fs::remove_file(input);
-    let _ = fs::remove_file(output);
+    fs::remove_file(input)?;
+    fs::remove_file(output)?;
 
     Ok(())
 }
@@ -191,8 +199,8 @@ fn copy_fast_handles_small_file() -> io::Result<()> {
     assert_eq!(copied, 10);
     assert_eq!(fs::read(&output)?, b"small file");
 
-    let _ = fs::remove_file(input);
-    let _ = fs::remove_file(output);
+    fs::remove_file(input)?;
+    fs::remove_file(output)?;
 
     Ok(())
 }
@@ -210,8 +218,8 @@ fn copy_fast_handles_large_file() -> io::Result<()> {
     assert_eq!(copied, data.len() as u64);
     assert_eq!(fs::read(&output)?, data);
 
-    let _ = fs::remove_file(input);
-    let _ = fs::remove_file(output);
+    fs::remove_file(input)?;
+    fs::remove_file(output)?;
 
     Ok(())
 }
@@ -237,6 +245,7 @@ fn reader_handles_exact_buffer_boundaries_and_binary_bytes() -> io::Result<()> {
         }
         assert_eq!(actual, data);
         assert_eq!(reader.read_byte()?, None);
+        drop(reader);
         fs::remove_file(input)?;
     }
     Ok(())
@@ -269,6 +278,36 @@ fn writer_handles_boundaries_empty_writes_and_repeated_flush() -> io::Result<()>
         assert_eq!(fs::read(&output)?, data);
         fs::remove_file(output)?;
     }
+    Ok(())
+}
+
+#[test]
+fn records_preserve_modulo_pattern_at_usize_boundaries() {
+    for index in [
+        0,
+        1,
+        250,
+        251,
+        usize::MAX - RECORD_SIZE,
+        usize::MAX - 1,
+        usize::MAX,
+    ] {
+        let expected = std::array::from_fn(|offset| {
+            // Widen before addition so the oracle does not repeat usize overflow.
+            u8::try_from((index as u128 + offset as u128) % 251).unwrap()
+        });
+        assert_eq!(make_record(index), expected, "index={index}");
+    }
+}
+
+#[test]
+fn dropping_writer_flushes_pending_bytes() -> io::Result<()> {
+    let output = temp_file_path("writer_drop_output.bin");
+    let mut writer = MyBufWriter::create(&output)?;
+    writer.write_buffered(b"pending")?;
+    drop(writer);
+    assert_eq!(fs::read(&output)?, b"pending");
+    fs::remove_file(output)?;
     Ok(())
 }
 

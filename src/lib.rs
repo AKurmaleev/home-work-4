@@ -1,9 +1,36 @@
+//! File-backed buffering for the homework's byte-at-a-time copying API.
+//!
+//! Call [`MyBufWriter::close`] or [`MyBufWriter::flush`] explicitly to observe
+//! write errors. Drop attempts a final flush but cannot report failures; pending
+//! bytes can be lost. Flushing does not guarantee crash durability.
+//!
+//! ```
+//! use hw::{MyBufReader, MyBufWriter};
+//!
+//! # fn main() -> std::io::Result<()> {
+//! # let directory = std::env::temp_dir().join(format!("hw-doc-{}", std::process::id()));
+//! # std::fs::create_dir(&directory)?;
+//! let path = directory.join("example.bin");
+//! let mut writer = MyBufWriter::create(&path)?;
+//! writer.write_buffered(b"abc")?;
+//! writer.close()?;
+//!
+//! let mut reader = MyBufReader::open(&path)?;
+//! assert_eq!(reader.read_byte()?, Some(b'a'));
+//! # drop(reader);
+//! # std::fs::remove_file(path)?;
+//! # std::fs::remove_dir(directory)?;
+//! # Ok(())
+//! # }
+//! ```
+
 use std::{
     fs::File,
     io::{self, Read, Write},
     path::Path,
 };
 
+/// Maximum number of pending bytes in each application buffer.
 pub const BUFFER_SIZE: usize = 64 * 1024;
 
 // -----------------------------------------------------------------------------
@@ -11,6 +38,7 @@ pub const BUFFER_SIZE: usize = 64 * 1024;
 // -----------------------------------------------------------------------------
 
 /// Reads one byte at a time while refilling a 64 KiB application buffer.
+#[derive(Debug)]
 pub struct MyBufReader {
     file: File,
     buffer: Vec<u8>,
@@ -55,6 +83,9 @@ impl MyBufReader {
 // -----------------------------------------------------------------------------
 
 /// Collects writes in a 64 KiB application buffer before writing to a file.
+///
+/// Call `close` or `flush` explicitly: Drop ignores write errors and can lose data.
+#[derive(Debug)]
 pub struct MyBufWriter {
     file: File,
     buffer: Vec<u8>,
@@ -93,8 +124,9 @@ impl MyBufWriter {
     }
 
     /// Buffers the supplied bytes; may return an I/O error while draining a full buffer.
-    /// On error, some bytes may already have been accepted or written; do not replay
-    /// the entire input slice without tracking progress.
+    /// On error, some bytes may already have been accepted or written, and this API
+    /// does not return that count. Do not replay the entire slice on this writer;
+    /// abandon the transfer or restart it using a fresh destination.
     pub fn write_buffered(&mut self, mut data: &[u8]) -> io::Result<()> {
         while !data.is_empty() {
             if self.buffer.len() == BUFFER_SIZE {
@@ -124,16 +156,22 @@ impl MyBufWriter {
 
 impl Drop for MyBufWriter {
     fn drop(&mut self) {
-        // Ошибку из Drop вернуть нельзя.
-        // Поэтому в реальном коде лучше явно вызывать close() или flush().
+        // Only this destructor fallback ignores file-write errors: Drop cannot
+        // return them. Pending data may be lost; explicit flush/close is required
+        // for checked completion. Tested with a read-only file and pending bytes.
+        #[allow(clippy::let_underscore_must_use)]
         let _ = self.flush();
     }
 }
 
 // -----------------------------------------------------------------------------
-// Медленная версия
+// Unbuffered copy
 // -----------------------------------------------------------------------------
 
+/// Copies one byte at a time using direct file I/O and returns the byte count.
+///
+/// Creates or truncates `output`; input and output must name distinct files.
+/// Returns open, read, write, or flush errors; errors can leave partial output.
 pub fn copy_slow(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Result<u64> {
     let mut input = File::open(input)?;
     let mut output = File::create(output)?;
@@ -157,12 +195,15 @@ pub fn copy_slow(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Resul
 }
 
 // -----------------------------------------------------------------------------
-// Быстрая версия
+// Buffered copy
 // -----------------------------------------------------------------------------
-// copy_fast специально тоже использует побайтный API.
-// Разница должна быть не в коде копирования, а в реализации MyBufReader и MyBufWriter
-// эту функцию не нужно менять, она должна работать с любыми реализациями MyBufReader и MyBufWriter,
-// которые вы сделаете
+// The assignment keeps this byte-at-a-time loop unchanged: buffering belongs in
+// MyBufReader and MyBufWriter, not in the copy algorithm.
+
+/// Copies through the custom buffers and returns the byte count after closing.
+///
+/// Creates or truncates `output`; input and output must name distinct files.
+/// Returns open, read, write, or close errors; errors can leave partial output.
 pub fn copy_fast(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Result<u64> {
     let mut reader = MyBufReader::open(input)?;
     let mut writer = MyBufWriter::create(output)?;
@@ -179,18 +220,26 @@ pub fn copy_fast(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Resul
     Ok(copied)
 }
 
+/// Number of bytes in a generated demonstration record.
 pub const RECORD_SIZE: usize = 10;
 
+/// Generates ten bytes with mathematical value `(index + offset) % 251`.
+///
+/// Every `usize` index is supported, without machine-word wrapping.
 pub fn make_record(index: usize) -> [u8; RECORD_SIZE] {
     let mut record = [0u8; RECORD_SIZE];
 
     (0..RECORD_SIZE).for_each(|i| {
-        record[i] = ((index + i) % 251) as u8;
+        // Reduce first: the sum is at most 250 + 9, and the result fits u8.
+        record[i] = ((index % 251 + i) % 251) as u8;
     });
 
     record
 }
 
+/// Creates or truncates a file and writes `records` consecutive generated records.
+///
+/// Returns create, write, or flush errors; errors can leave a partial file.
 pub fn generate_input_file(path: impl AsRef<Path>, records: usize) -> io::Result<()> {
     let mut file = File::create(path)?;
 
@@ -248,6 +297,24 @@ mod tests {
         write_pending(&mut output, &mut pending).unwrap();
         assert_eq!(output.output, b"abcdef");
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn flush_and_close_report_errors_and_drop_does_not_panic() -> io::Result<()> {
+        // A read-only real file deterministically rejects writes on every host.
+        let mut writer = MyBufWriter {
+            file: File::open(std::env::current_exe()?)?,
+            buffer: b"pending".to_vec(),
+        };
+        writer
+            .flush()
+            .expect_err("read-only file must reject writes");
+        assert_eq!(writer.buffer, b"pending");
+        writer
+            .close()
+            .expect_err("close must expose the flush failure");
+        // close consumes the writer, so its Drop retry has also completed here.
+        Ok(())
     }
 
     #[test]

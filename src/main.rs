@@ -1,3 +1,5 @@
+//! Runs the assignment's single-sample file-copy demonstration, not a rigorous benchmark.
+
 use std::{fs, io, time::Instant};
 
 use hw::{RECORD_SIZE, copy_fast, copy_slow, generate_input_file};
